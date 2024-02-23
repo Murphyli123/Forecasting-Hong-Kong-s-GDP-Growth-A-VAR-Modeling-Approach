@@ -1,0 +1,560 @@
+---
+title: "new hk macro mod"
+output: html_document
+date: "2023-06-29"
+editor_options: 
+  chunk_output_type: console
+---
+```{r}
+#load packages
+library(pacman)
+
+p_load(tidyverse, stargazer, vars, forecast, bvartools, readxl, tseries, lubridate, RColorBrewer, ggfortify, Metrics, BVAR, forestmangr, tsDyn, x12)
+
+#redefine select function
+select<-dplyr::select
+
+```
+
+```{r}
+df<-read.csv("clean data2.csv")
+
+worldgdp_df<-read.csv('world gdp.csv')
+worldgdp_df$date<-mdy(worldgdp_df$date)
+worldgdp_df<-worldgdp_df%>%
+  na.omit()%>%
+  mutate(worldgdp=jp_gdp+ gm_gdp+ fr_gdp+ uk_gdp+ us_gdp)%>%
+  filter(date<mdy('04-01-2023'))
+
+rates_df<-read.csv('rates.csv')
+rates_df$date<-mdy(rates_df$date)
+
+unitvalueim_df<-read.csv('Unit Value Index Imports.csv')
+unitvalueim_df$date<-mdy(unitvalueim_df$date)
+```
+
+turn date from character to date 
+```{r}
+df$date<-mdy(df$date)
+```
+
+###################################################################
+data for new var model
+```{r}
+
+
+endo_df<-df%>%
+  mutate(lrgdp=log(hk_rgdp),
+         lrgdp_d=lrgdp-lag(lag(lag(lag(lrgdp)))),
+         lcpi=log(hk_cpi),
+         lcpi_d=lcpi-lag(lag(lag(lag(lcpi)))))%>%
+  select(c('lrgdp_d','date','lcpi_d'))
+
+
+
+inv_data<-read.csv('investment data.csv')
+
+inv_data$date<-mdy(inv_data$date)
+
+temp<-inv_data%>%
+  mutate(linv=log(hk_gfcf),
+         linv_d=linv-lag(linv))%>%
+  select(date, linv_d)
+
+endo_df<-left_join(endo_df, temp)
+
+exo_df<-worldgdp_df%>%
+  mutate(lwgdp=log(worldgdp),
+         lwgdp_d=lwgdp-lag(lwgdp))%>%
+  select(date, lwgdp_d)
+
+temp<-rates_df%>%
+  select(date, hk_blr)
+
+exo_df<-left_join(exo_df, temp)
+
+unitvalueim_df$hk_uvi<-as.numeric(unitvalueim_df$hk_uvi)
+
+#yoy since uvi is monthly data
+temp<-unitvalueim_df%>%
+  mutate(luvi=log(hk_uvi),
+         luvi_d=luvi-lag(lag(lag(lag(lag(lag(lag(lag(lag(lag(lag(lag(luvi)))))))))))))%>%
+  select(date, luvi_d)
+
+
+exo_df<-left_join(exo_df, temp)
+
+sars<-data.frame(date=exo_df$date, sars=0)
+sars$sars[sars$date>=mdy('01-01-2002') & sars$date<=mdy('07-01-2003')]<-1
+
+
+
+exo_df<-left_join(exo_df, sars)
+
+exo_df$hk_blr<-as.numeric(exo_df$hk_blr)
+
+endo_df<-endo_df%>% na.omit()%>%filter(date<mdy('01-01-2020'))
+endo_df<-endo_df%>% na.omit()%>%filter(date>=mdy('06-01-1991'))
+exo_df<-exo_df%>%na.omit()%>%filter(date<mdy('01-01-2020'))
+
+
+```
+
+
+
+add lag to exo 2 data (sars hk_blr)
+```{r}
+exo2_df<-data.frame(sars=exo_df$sars,
+                    hk_blr=exo_df$hk_blr,
+                    date=exo_df$date)
+
+exo2_df<-exo2_df%>%
+  mutate(sars_l1=lag(sars),
+         sars_l2=lag(sars_l1), 
+         sars_l3=lag(sars_l2),
+         hk_blr_l1=lag(hk_blr),
+         hk_blr_l2=lag(hk_blr_l1),
+         hk_blr_l3=lag(hk_blr_l2))
+```
+
+df with endogenous variables: endo_df
+df with exogenous variables: exo_df
+
+
+variables in endo_df:
+lrgdp_d
+lcpi_d  
+linv_d
+
+variables in exo_df:
+lwgdp_d 
+hk_blr  
+luvi_d  
+sars   
+
+(time from 1992 q1 to 2019 q4)
+make time series objects
+```{r}
+#endogenous variables
+lrgdp_d_ts<-ts(endo_df$lrgdp_d, start=c(1991,2),end=c(2019,4),4)
+lcpi_d_ts<-ts(endo_df$lcpi_d  , start=c(1991,2),end=c(2019,4),4)
+linv_d_ts<-ts(endo_df$linv_d, start=c(1991,2),end=c(2019,4),4)
+
+
+#exogenous variables
+lwgdp_d_ts<-ts(exo_df$lwgdp_d , start=c(1991,2),end=c(2019,4),4)
+luvi_d_ts<-ts(exo_df$luvi_d , start=c(1991,2),end=c(2019,4),4)
+
+#exogenous 2 variables
+sars_ts_l1<-ts(exo2_df$sars_l1 , start=c(1991,2),end=c(2019,4),4)
+sars_ts_l2<-ts(exo2_df$sars_l2 , start=c(1991,2),end=c(2019,4),4)
+sars_ts_l3<-ts(exo2_df$sars_l3 , start=c(1991,2),end=c(2019,4),4)
+hk_blr_ts_l1<-ts(exo2_df$hk_blr_l1 , start=c(1991,2),end=c(2019,4),4)
+hk_blr_ts_l2<-ts(exo2_df$hk_blr_l2 , start=c(1991,2),end=c(2019,4),4)
+hk_blr_ts_l3<-ts(exo2_df$hk_blr_l3 , start=c(1991,2),end=c(2019,4),4)
+
+```
+
+
+TRYING OUT X12 SEASONALITY ADJUSTMENT
+```{r}
+#hk_rgdp_ts<-ts(df$hk_rgdp[!is.na(df$hk_rgdp)], start=c(1973,1), frequency = 4)
+#x12out <- x12(hk_rgdp_ts,transform="auto",
+#		arima=c(0,1,1),sarima=c(0,1,1),regvariables="lpyear",
+#		sigmalim=c(2.0,3.0),outlier="all",critical=list(LS=3.5,TC=3),
+#		seasonalma="s3x3")
+
+#summary(x12(hk_rgdp_ts,arima=c(0,1,1),sarima=c(0,1,1)))
+```
+
+
+
+
+
+
+
+merge data to for var
+training period (1992 q1- 2016 q4)
+testing period (2017 q1- 2019 q4)
+```{r}
+endo_dat<-window(ts.union(lcpi_d_ts,lrgdp_d_ts,linv_d_ts), start=c(1991,2), end=c(2016,4))
+exo_dat<-window(ts.union(lwgdp_d_ts,luvi_d_ts), start=c(1991,2), end=c(2016,4))
+exo2_dat<-window(ts.union(sars_ts_l1, sars_ts_l2, sars_ts_l3, hk_blr_ts_l1, hk_blr_ts_l2, hk_blr_ts_l3), start=c(1991,2), end=c(2016,4))
+
+```
+
+
+
+
+
+```{r}
+#set dates
+q_ahead<-12
+start_date<-ymd("2016-12-01")
+test_date<-data.frame(date=ymd("1999-10-11")) #initialize date 
+test_date[1,1]<-start_date %m+% months(3)
+
+for (i in 2:q_ahead)
+{
+  test_date[i,1]<-test_date[i-1,1] %m+% months(3)
+}
+
+```
+
+
+
+run var for exo
+```{r}
+exo_mod<-VAR(exo_dat,p=3, type='const',season=4,  exogen=exo2_dat, ic='AIC')
+
+
+sars<-1:q_ahead
+sars[1:q_ahead]<-0
+
+#make blr constant =5
+blr<-1:q_ahead
+blr[1:q_ahead]<-5
+
+hk_blr_ts_l1<-ts(blr, start=c(2017,1), frequency = 4)
+hk_blr_ts_l2<-ts(blr, start=c(2017,1), frequency = 4)
+hk_blr_ts_l3<-ts(blr, start=c(2017,1), frequency = 4)
+sars_ts_l1<-ts(sars, start=c(2017,1), frequency = 4)
+sars_ts_l2<-ts(sars, start=c(2017,1), frequency = 4)
+sars_ts_l3<-ts(sars, start=c(2017,1), frequency = 4)
+
+exo_dv<-window(ts.union(sars_ts_l1,sars_ts_l2, sars_ts_l3, hk_blr_ts_l1, hk_blr_ts_l2, hk_blr_ts_l3), start=c(2017,1))
+
+exo_pred<-predict(exo_mod, n.ahead=q_ahead, dumvar=exo_dv)
+```
+
+
+make exogen ts data for full model
+```{r}
+#add lag to variables in exo_df
+exo_df<-exo_df%>%
+  mutate(lwgdp_d_l1=lag(lwgdp_d),
+         lwgdp_d_l2=lag(lwgdp_d_l1),
+         lwgdp_d_l3=lag(lwgdp_d_l2),
+         luvi_d_l1=lag(luvi_d),
+         luvi_d_l2=lag(luvi_d_l1),
+         luvi_d_l3=lag(luvi_d_l2))
+
+lwgdp_d_ts<-ts(exo_df$lwgdp_d, start=c(1991,2), frequency = 4)
+lwgdp_d_ts_l1<-ts(exo_df$lwgdp_d_l1, start=c(1991,2), frequency = 4)
+lwgdp_d_ts_l2<-ts(exo_df$lwgdp_d_l2, start=c(1991,2), frequency = 4)
+lwgdp_d_ts_l3<-ts(exo_df$lwgdp_d_l3, start=c(1991,2), frequency = 4)
+
+luvi_d_ts<-ts(exo_df$luvi_d, start=c(1991,2), frequency = 4)
+luvi_d_ts_l1<-ts(exo_df$luvi_d_l1, start=c(1991,2), frequency = 4)
+luvi_d_ts_l2<-ts(exo_df$luvi_d_l2, start=c(1991,2), frequency = 4)
+luvi_d_ts_l3<-ts(exo_df$luvi_d_l3, start=c(1991,2), frequency = 4)
+
+sars_ts<-ts(exo2_df$sars, start=c(1991,2), frequency=4)
+sars_ts_l1<-ts(exo2_df$sars_l1, start=c(1991,2), frequency=4)
+sars_ts_l2<-ts(exo2_df$sars_l2, start=c(1991,2), frequency=4)
+sars_ts_l3<-ts(exo2_df$sars_l3, start=c(1991,2), frequency=4)
+
+hk_blr_ts<-ts(exo2_df$hk_blr, start=c(1991,2), frequency=4)
+hk_blr_ts_l1<-ts(exo2_df$hk_blr_l1, start=c(1991,2), frequency=4)
+hk_blr_ts_l2<-ts(exo2_df$hk_blr_l2, start=c(1991,2), frequency=4)
+hk_blr_ts_l3<-ts(exo2_df$hk_blr_l3, start=c(1991,2), frequency=4)
+
+full_dat<-window(ts.union(lwgdp_d_ts, luvi_d_ts, hk_blr_ts, sars_ts, lcpi_d_ts, linv_d_ts, lrgdp_d_ts), start=c(1991,2), end=c(2016,4))
+
+
+exo_dat<-window(ts.union(lwgdp_d_ts_l1, lwgdp_d_ts_l2, lwgdp_d_ts_l3,luvi_d_ts_l1, luvi_d_ts_l2, luvi_d_ts_l3,sars_ts_l1,sars_ts_l2, sars_ts_l3, hk_blr_ts_l1, hk_blr_ts_l2, hk_blr_ts_l3), start=c(1991,2), end=c(2016,4))
+
+
+full_mod<-VAR(endo_dat, p=3, season=4, type='const', exogen= exo_dat, ic='AIC')
+
+summary(full_mod)
+
+stargazer(full_mod$varresult$lrgdp_d_ts)
+
+
+
+```
+
+
+make prediction with full_mod model
+```{r}
+exo_pred<-data.frame(lwgdp_d_p=exo_pred$fcst$lwgdp_d_ts[,1],
+                     luvi_d_p=exo_pred$fcst$luvi_d_ts[,1],
+                     hk_blr_p=blr,
+                     sars=sars,
+                     date=test_date)
+
+exo_pred_act<-exo_df%>%
+  filter(date<test_date[1,1])
+
+exo_pred_act<-rbind(left_join(exo_df, exo_pred), right_join(exo_df, exo_pred))
+
+
+
+
+for(i in 1:sum(is.na(exo_pred_act$lwgdp_d_p)))
+{
+  exo_pred_act$lwgdp_d_p[i]<-exo_pred_act$lwgdp_d[i]
+  exo_pred_act$luvi_d_p[i]<-exo_pred_act$luvi_d[i]
+  exo_pred_act$hk_blr_p[i]<-exo_pred_act$hk_blr[i]
+}
+
+exo_pred_act<-exo_pred_act%>%
+  mutate(lwgdp_d_p_l1=lag(lwgdp_d_p),
+         lwgdp_d_p_l2=lag(lwgdp_d_p_l1),
+         lwgdp_d_p_l3=lag(lwgdp_d_p_l2),
+         luvi_d_p_l1=lag(luvi_d),
+         luvi_d_p_l2=lag(luvi_d_l1),
+         luvi_d_p_l3=lag(luvi_d_l2),
+         hk_blr_p_l1=lag(hk_blr_p),
+         hk_blr_p_l2=lag(hk_blr_p_l1),
+         hk_blr_p_l3=lag(hk_blr_p_l2))
+
+temp<-exo_pred_act%>%
+    select(lwgdp_d_p_l1, lwgdp_d_p_l2, lwgdp_d_p_l3, luvi_d_p_l1, luvi_d_p_l2, luvi_d_p_l3, hk_blr_p_l1, hk_blr_p_l2, hk_blr_p_l3, sars, date)%>%
+  filter(date>=test_date[1,1])
+
+
+
+
+
+lwgdp_d_ts_l1<-ts(temp$lwgdp_d_p_l1, start=c(2017,1), frequency = 4)
+lwgdp_d_ts_l2<-ts(temp$lwgdp_d_p_l2, start=c(2017,1), frequency = 4)
+lwgdp_d_ts_l3<-ts(temp$lwgdp_d_p_l3, start=c(2017,1), frequency = 4)
+
+luvi_d_ts_l1<-ts(temp$luvi_d_p_l1, start=c(2017,1), frequency = 4)
+luvi_d_ts_l2<-ts(temp$luvi_d_p_l2, start=c(2017,1), frequency = 4)
+luvi_d_ts_l3<-ts(temp$luvi_d_p_l3, start=c(2017,1), frequency = 4)
+
+hk_blr_ts_l1<-ts(temp$hk_blr_p_l1, start=c(2017,1), frequency = 4)
+hk_blr_ts_l2<-ts(temp$hk_blr_p_l2, start=c(2017,1), frequency = 4)
+hk_blr_ts_l3<-ts(temp$hk_blr_p_l3, start=c(2017,1), frequency = 4)
+
+sars_ts_l1<-ts(temp$sars, start=c(2017,1), frequency=4)
+sars_ts_l2<-ts(temp$sars, start=c(2017,1), frequency=4)
+sars_ts_l2<-ts(temp$sars, start=c(2017,1), frequency=4)
+
+
+exo_dv<-window(ts.union(lwgdp_d_ts_l1,lwgdp_d_ts_l2,lwgdp_d_ts_l3, luvi_d_ts_l1,luvi_d_ts_l2,luvi_d_ts_l3,sars_ts_l1,sars_ts_l2, sars_ts_l3, hk_blr_ts_l1, hk_blr_ts_l2, hk_blr_ts_l3), start=c(2017,1), end=(c(2019,4)))
+
+
+
+
+endo_pred<-predict(full_mod,n.ahead=q_ahead, dumvar=exo_dv)
+
+
+endo_pred<-data.frame(lrgdp_d_p=endo_pred$fcst$lrgdp_d_ts[,1],
+                      lcpi_d_p=endo_pred$fcst$lcpi_d_ts[,1],
+                      linv_d_p=endo_pred$fcst$linv_d_ts[,1],
+                      date=test_date)
+
+
+
+#extract predicted for exo and endo
+endo_pred_act<-left_join(endo_df, endo_pred)
+
+```
+
+plot predictions
+```{r}
+for(i in 4:103){
+  endo_pred_act$lrgdp_d_p[i]<-as.data.frame(fitted(full_mod))$lrgdp_d_ts[i-3]
+  endo_pred_act$lcpi_d_p[i]<-as.data.frame(fitted(full_mod))$lcpi_d_ts[i-3]
+  endo_pred_act$linv_d_p[i]<-as.data.frame(fitted(full_mod))$linv_d_ts[i-3]
+}
+
+as.data.frame(fitted(full_mod))$lrgdp_d_ts
+
+#plot lrgdp_d with pred
+endo_pred_act%>%
+  pivot_longer(c(lrgdp_d, lrgdp_d_p))%>%
+  select(c(value, date, name))%>%
+  na.omit()%>%
+  ggplot(aes(x=date, y=value, color=name))+
+  geom_line()+
+  theme_bw()+
+  geom_vline(xintercept=ymd('2017-01-01'))
+
+#plot lcpi_d with pred
+endo_pred_act%>%
+  pivot_longer(c(lcpi_d, lcpi_d_p))%>%
+  select(c(value, date, name))%>%
+  na.omit()%>%
+  ggplot(aes(x=date, y=value, color=name))+
+  geom_line()+
+  theme_bw()+
+  geom_vline(xintercept=ymd('2017-01-01'))
+
+#plot linv_d with pred
+endo_pred_act%>%
+  pivot_longer(c(linv_d, linv_d_p))%>%
+  select(c(value, date, name))%>%
+  na.omit()%>%
+  ggplot(aes(x=date, y=value, color=name))+
+  geom_line()+
+  theme_bw()+
+  geom_vline(xintercept=ymd('2017-01-01'))
+
+#plot lwgdp_d with pred
+exo_pred_act%>%
+  pivot_longer(c(lwgdp_d, lwgdp_d_p))%>%
+  select(c(value, date, name))%>%
+  na.omit()%>%
+  ggplot(aes(x=date, y=value, color=name))+
+  geom_line()+
+  theme_bw()+
+  geom_vline(xintercept=ymd('2017-01-01'))
+
+#plot luvi_d with pred
+exo_pred_act%>%
+  pivot_longer(c(luvi_d, luvi_d_p))%>%
+  select(c(value, date, name))%>%
+  na.omit()%>%
+  ggplot(aes(x=date, y=value, color=name))+
+  geom_line()+
+  theme_bw()+
+  geom_vline(xintercept=ymd('2017-01-01'))
+```
+
+
+
+rmse for endogenous variable predictions
+```{r}
+rmse(endo_pred_act$lrgdp_d[endo_pred_act$date>=ymd('2017-1-1')], endo_pred_act$lrgdp_d_p[endo_pred_act$date>=ymd('2017-1-1')])
+
+rmse(endo_pred_act$lcpi_d[endo_pred_act$date>=ymd('2017-1-1')], endo_pred_act$lcpi_d_p[endo_pred_act$date>=ymd('2017-1-1')])
+
+rmse(endo_pred_act$linv_d[endo_pred_act$date>=ymd('2017-1-1')], endo_pred_act$linv_d_p[endo_pred_act$date>=ymd('2017-1-1')])
+
+rmse(endo_pred_act$lrgdp_d[endo_pred_act$date>=ymd('1992-1-1')], endo_pred_act$lrgdp_d_p[endo_pred_act$date>=ymd('1992-1-1')])
+
+rmse(endo_pred_act$lcpi_d[endo_pred_act$date>=ymd('1992-1-1')], endo_pred_act$lcpi_d_p[endo_pred_act$date>=ymd('1992-1-1')])
+
+rmse(endo_pred_act$linv_d[endo_pred_act$date>=ymd('1992-1-1')], endo_pred_act$linv_d_p[endo_pred_act$date>=ymd('1992-1-1')])
+
+
+```
+
+
+predicted and actual rgdp
+```{r}
+temp<-df%>%
+  select(date, hk_rgdp)
+
+
+endo_pred_act<-left_join(endo_pred_act, temp)%>%
+  mutate(lrgdp_p=log(hk_rgdp))
+
+for(i in (sum(is.na(endo_pred_act$lrgdp_d_p))+1):(sum(is.na(endo_pred_act$lrgdp_d_p))+q_ahead))
+{
+  endo_pred_act$lrgdp_p[i]<-endo_pred_act$lrgdp_p[i-1]+endo_pred_act$lrgdp_d_p[i]
+}
+
+for(i in (1):((length(endo_pred_act$lrgdp_d_p))-q_ahead-1))
+{
+  endo_pred_act$lrgdp_p[i]<-NA
+}
+
+endo_pred_act%>%
+  mutate(rgdp_p=exp(lrgdp_p))%>%
+  pivot_longer(c('rgdp_p','hk_rgdp'))%>%
+  ggplot(aes(x=date, y=value, color=name))+
+  geom_line()+
+  theme_bw()+
+  geom_vline(xintercept=mdy('01-01-2017'))+
+  ylab('Real GDP')+
+  ggtitle('Actual and modeled real gdp')
+```
+
+
+predicted and actual cpi
+```{r}
+temp<-df%>%
+  select(date, hk_cpi)
+
+endo_pred_act<-left_join(endo_pred_act, temp)%>%
+  mutate(lcpi_p=log(hk_cpi))
+
+for(i in (sum(is.na(endo_pred_act$lcpi_d_p))+1):(sum(is.na(endo_pred_act$lcpi_d_p))+q_ahead))
+{
+  endo_pred_act$lcpi_p[i]<-endo_pred_act$lcpi_p[i-1]+endo_pred_act$lcpi_d_p[i]
+}
+
+for(i in (1):((length(endo_pred_act$lcpi_d_p))-q_ahead-1))
+{
+  endo_pred_act$lcpi_p[i]<-NA
+}
+
+endo_pred_act%>%
+  mutate(cpi_p=exp(lcpi_p))%>%
+  pivot_longer(c('cpi_p','hk_cpi'))%>%
+  ggplot(aes(x=date, y=value, color=name))+
+  geom_line()+
+  theme_bw()+
+  geom_vline(xintercept=mdy('01-01-2017'))+
+  ylab('Consumer price index')+
+  ggtitle('Actual and modeled CPI')
+
+```
+
+
+predicted and actual investment
+```{r}
+temp<-inv_data%>%
+  select(date, hk_gfcf)
+
+endo_pred_act<-left_join(endo_pred_act, temp)%>%
+  mutate(linv_p=log(hk_gfcf))
+
+for(i in (sum(is.na(endo_pred_act$linv_d_p))+1):(sum(is.na(endo_pred_act$linv_d_p))+q_ahead))
+{
+  endo_pred_act$linv_p[i]<-endo_pred_act$linv_p[i-1]+endo_pred_act$linv_d_p[i]
+}
+
+for(i in (1):((length(endo_pred_act$linv_d_p))-q_ahead-1))
+{
+  endo_pred_act$linv_p[i]<-NA
+}
+
+
+endo_pred_act%>%
+  mutate(inv_p=exp(linv_p))%>%
+  pivot_longer(c('inv_p','hk_gfcf'))%>%
+  ggplot(aes(x=date, y=value, color=name))+
+  geom_line()+
+  theme_bw()+
+  geom_vline(xintercept=mdy('01-01-2017'))+
+  ylab('Gross fixed capital formation (usd millions)')+
+  ggtitle('Actual and modeled domestic investments')
+
+
+data.frame
+
+class(lcpi_d_ts)
+
+```
+
+
+```{r}
+full_mod2<-VAR(full_dat, p=3, season=4, type='const', ic='AIC')
+
+
+
+plot(irf(full_mod2, impulse = 'linv_d_ts', response= 'lrgdp_d_ts'))
+plot(irf(full_mod2, impulse = 'lcpi_d_ts', response= 'lrgdp_d_ts'))
+plot(irf(full_mod2, impulse = 'lwgdp_d_ts', response= 'lrgdp_d_ts'))
+plot(irf(full_mod2, impulse = 'hk_blr_ts', response= 'lrgdp_d_ts'))
+plot(irf(full_mod2, impulse = 'luvi_d_ts', response= 'lrgdp_d_ts'))
+plot(irf(full_mod2, impulse = 'sars_ts', response= 'lrgdp_d_ts'))
+
+
+```
+
+
+
+
+
+
+
+
+
